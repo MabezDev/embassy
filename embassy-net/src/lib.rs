@@ -269,7 +269,7 @@ impl<D: Driver + 'static> Stack<D> {
         let next_local_port = (random_seed % (LOCAL_PORT_MAX - LOCAL_PORT_MIN) as u64) as u16 + LOCAL_PORT_MIN;
 
         #[cfg_attr(feature = "medium-ieee802154", allow(unused_mut))]
-        let mut socket = SocketStack {
+        let socket = SocketStack {
             sockets,
             iface,
             waker: WakerRegistration::new(),
@@ -277,7 +277,7 @@ impl<D: Driver + 'static> Stack<D> {
         };
 
         #[cfg_attr(feature = "medium-ieee802154", allow(unused_mut))]
-        let mut inner = Inner {
+        let inner = Inner {
             device,
             link_up: false,
             #[cfg(feature = "proto-ipv4")]
@@ -295,35 +295,51 @@ impl<D: Driver + 'static> Stack<D> {
             dns_waker: WakerRegistration::new(),
         };
 
-        #[cfg(feature = "medium-ieee802154")]
-        let _ = config;
-
-        #[cfg(feature = "proto-ipv4")]
-        match config.ipv4 {
-            ConfigV4::Static(config) => {
-                inner.apply_config_v4(&mut socket, config);
-            }
-            #[cfg(feature = "dhcpv4")]
-            ConfigV4::Dhcp(config) => {
-                let mut dhcp_socket = smoltcp::socket::dhcpv4::Socket::new();
-                inner.apply_dhcp_config(&mut dhcp_socket, config);
-                let handle = socket.sockets.add(dhcp_socket);
-                inner.dhcp_socket = Some(handle);
-            }
-            ConfigV4::None => {}
-        }
-        #[cfg(feature = "proto-ipv6")]
-        match config.ipv6 {
-            ConfigV6::Static(config) => {
-                inner.apply_config_v6(&mut socket, config);
-            }
-            ConfigV6::None => {}
-        }
-
-        Self {
+        let s = Self {
             socket: RefCell::new(socket),
             inner: RefCell::new(inner),
-        }
+        };
+
+        s.apply_config(config);
+
+        s
+    }
+
+    /// Apply a [`Config`] to the [`Stack`]
+    pub fn apply_config(&self, config: Config) {
+        self.with_mut(|sockets, inner| {
+            #[cfg(feature = "medium-ieee802154")]
+            let _ = config;
+
+            #[cfg(feature = "proto-ipv4")]
+            match config.ipv4 {
+                ConfigV4::Static(config) => {
+                    inner.apply_config_v4(sockets, config);
+                }
+                #[cfg(feature = "dhcpv4")]
+                ConfigV4::Dhcp(config) => {
+                    let handle = if let Some(handle) = inner.dhcp_socket {
+                        handle
+                    } else {
+                        let dhcp_socket = smoltcp::socket::dhcpv4::Socket::new();
+                        let handle = sockets.sockets.add(dhcp_socket);
+                        inner.dhcp_socket = Some(handle);
+                        handle
+                    };
+                    let dhcp_socket = sockets.sockets.get_mut(handle);
+                    inner.apply_dhcp_config(dhcp_socket, config);
+                }
+                ConfigV4::None => {}
+            }
+            #[cfg(feature = "proto-ipv6")]
+            match config.ipv6 {
+                ConfigV6::Static(config) => {
+                    let socket = sockets.get_mut(inner.handle);
+                    inner.apply_config_v6(&mut socket, config);
+                }
+                ConfigV6::None => {}
+            }
+        })
     }
 
     fn with<R>(&self, f: impl FnOnce(&SocketStack, &Inner<D>) -> R) -> R {
