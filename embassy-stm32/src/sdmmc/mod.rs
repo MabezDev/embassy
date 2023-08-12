@@ -28,7 +28,12 @@ pub struct InterruptHandler<T: Instance> {
 impl<T: Instance> InterruptHandler<T> {
     fn data_interrupts(enable: bool) {
         let regs = T::regs();
-        regs.maskr().write(|w| {
+        // In 4bit wide mode, we need to listen for the stbiterr
+        #[cfg(sdmmc_v1)]
+        regs.maskr()
+            .write_value(stm32_metapac::sdmmc::regs::Maskr((enable as u32) << 9));
+
+        regs.maskr().modify(|w| {
             w.set_dcrcfailie(enable);
             w.set_dtimeoutie(enable);
             w.set_dataendie(enable);
@@ -709,6 +714,8 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
                 return Poll::Ready(Err(Error::Crc));
             } else if status.dtimeout() {
                 return Poll::Ready(Err(Error::Timeout));
+            } else if status.0 & (1 << 9) == 1 {
+                return Poll::Ready(Err(Error::NoCard));
             } else if status.dataend() {
                 return Poll::Ready(Ok(()));
             }
@@ -784,6 +791,8 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
                 return Poll::Ready(Err(Error::Crc));
             } else if status.dtimeout() {
                 return Poll::Ready(Err(Error::Timeout));
+            } else if status.0 & (1 << 9) == 1 {
+                return Poll::Ready(Err(Error::NoCard));
             } else if status.dataend() {
                 return Poll::Ready(Ok(()));
             }
@@ -850,6 +859,7 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
                 w.set_idmabtcc(true);
             }
         });
+        regs.icr().write_value(stm32_metapac::sdmmc::regs::Icr(1 << 9));
     }
 
     async fn get_scr(&mut self, card: &mut Card) -> Result<(), Error> {
@@ -875,6 +885,8 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
                 return Poll::Ready(Err(Error::Crc));
             } else if status.dtimeout() {
                 return Poll::Ready(Err(Error::Timeout));
+            } else if status.0 & (1 << 9) == 1 {
+                return Poll::Ready(Err(Error::NoCard));
             } else if status.dataend() {
                 return Poll::Ready(Ok(()));
             }
@@ -930,18 +942,21 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
             // Wait for CMDSENT or a timeout
             while {
                 status = regs.star().read();
-                !(status.ctimeout() || status.cmdsent())
+                !(status.ctimeout() || status.cmdsent() || (status.0 & (1 << 9) == 1))
             } {}
         } else {
             // Wait for CMDREND or CCRCFAIL or a timeout
             while {
                 status = regs.star().read();
-                !(status.ctimeout() || status.cmdrend() || status.ccrcfail())
+                !(status.ctimeout() || status.cmdrend() || status.ccrcfail() || (status.0 & (1 << 9) == 1))
             } {}
         }
 
+        info!("Status from CMD{}: {}", cmd.arg, status.0);
         if status.ctimeout() {
             return Err(Error::Timeout);
+        } else if status.0 & (1 << 9) == 1 {
+            return Err(Error::NoCard);
         } else if status.ccrcfail() {
             return Err(Error::Crc);
         }
@@ -1158,6 +1173,8 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
                 return Poll::Ready(Err(Error::Crc));
             } else if status.dtimeout() {
                 return Poll::Ready(Err(Error::Timeout));
+            } else if status.0 & (1 << 9) == 1 {
+                return Poll::Ready(Err(Error::NoCard));
             } else if status.dataend() {
                 return Poll::Ready(Ok(()));
             }
@@ -1209,6 +1226,8 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
                 return Poll::Ready(Err(Error::Crc));
             } else if status.dtimeout() {
                 return Poll::Ready(Err(Error::Timeout));
+            } else if status.0 & (1 << 9) == 1 {
+                return Poll::Ready(Err(Error::NoCard));
             } else if status.dataend() {
                 return Poll::Ready(Ok(()));
             }
@@ -1224,7 +1243,7 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
                 drop(transfer);
 
                 // TODO: Make this configurable
-                let mut timeout: u32 = 0x00FF_FFFF;
+                let mut timeout: u32 = 0x0000_FFFF;
 
                 // Try to read card status (ACMD13)
                 while timeout > 0 {
