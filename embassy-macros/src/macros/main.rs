@@ -36,6 +36,30 @@ pub fn riscv(args: &[NestedMeta]) -> TokenStream {
     }
 }
 
+pub fn xtensa(args: &[NestedMeta]) -> TokenStream {
+    let maybe_entry = match Args::from_list(args) {
+        Ok(args) => args.entry,
+        Err(e) => return e.write_errors(),
+    };
+
+    let entry = maybe_entry.unwrap_or("xtensa_lx_rt::entry".into());
+    let entry = match Expr::from_string(&entry) {
+        Ok(expr) => expr,
+        Err(e) => return e.write_errors(),
+    };
+
+    quote! {
+        #[#entry]
+        fn main() -> ! {
+            let mut executor = ::embassy_executor::Executor::new();
+            let executor = unsafe { __make_static(&mut executor) };
+            executor.run(|spawner| {
+                spawner.must_spawn(__embassy_main(spawner));
+            })
+        }
+    }
+}
+
 pub fn cortex_m() -> TokenStream {
     quote! {
         #[cortex_m_rt::entry]
